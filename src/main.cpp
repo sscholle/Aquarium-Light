@@ -10,6 +10,7 @@
 double latitude = -34.0195173;     // Observer's latitude 
 double longitude = 22.779688;  // Observer's longitude
 int time_zone = 2;          // UTC offset
+int minSunElevation = -2;    // Minimum sun elevation for sunrise/sunset
 double sunAzimuth, sunElevation;
 double transit, sunrise, sunset;
  
@@ -57,7 +58,7 @@ DateTime now;// = RTC.now();
 */
 const byte ledPin = LED_BUILTIN;// for indicating modes
 const byte gatePin = 5;
-const byte interruptPin = 2;// RTC interrupt pin
+// const byte interruptPin = 2;// RTC interrupt pin
 volatile byte brightness = 0;// pwm value to be used in the ISR
 byte mode = 1;// 0 = manual, 1 = automatic
 byte manualBrightness = 127;// brightness value for manual mode
@@ -80,10 +81,16 @@ void setup() {
   if(mode != 0 && mode != 1) {
     mode = 1;// default to automatic mode
   }
+  Serial.println("Mode: " + String(mode));
+
   EEPROM.get(eepromAddress + 1, manualBrightness);// get the manual brightness from the EEPROM
+  if(manualBrightness < 0 || manualBrightness > 255) {
+    manualBrightness = 127;// default to 50% brightness
+  }
+  Serial.println("Manual Brightness: " + String(manualBrightness));
 
   // BUTTON
-  button.setDebounceTime(50); // set debounce time to 50 milliseconds
+  // button.setDebounceTime(50); // set debounce time to 50 milliseconds - not required when using a 'delay' in the loop
 
   // PINS
   pinMode(gatePin, OUTPUT);
@@ -101,7 +108,7 @@ void setup() {
   }
   // RTC.writeSqwPinMode(DS3231_SquareWave1Hz);
   now = RTC.now();
-  
+  displayTime(now);
   // SUN
 
 }
@@ -124,6 +131,7 @@ void setup() {
 void setMode(byte newMode) {
   mode = newMode;
   EEPROM.put(eepromAddress, mode);// save the mode to the EEPROM
+  Serial.println("Mode: " + String(mode));
 }
 
 unsigned long lastBrightnessUpdate = 0;
@@ -197,7 +205,7 @@ void processBrightness() {
     now = RTC.now();
     // NOTE: elevation calculation will be used to limit the brightness of the LED (example 90=max, 0=min)
     // Calculate the solar position, in degrees
-    calcHorizontalCoordinates(now.unixtime(), latitude, longitude, sunAzimuth, sunElevation);
+    calcHorizontalCoordinates(now.unixtime() - time_zone * 3600L, latitude, longitude, sunAzimuth, sunElevation);// for some reason we mustt remove the timezone offset?
 
     // Print results
     Serial.print(F("Az: "));
@@ -206,7 +214,7 @@ void processBrightness() {
     Serial.print(sunElevation);
     Serial.println(F("°"));
     // calculate the brightness based on the sun's elevation
-    analogWrite(gatePin, map(min(90, max(-20, sunElevation)), -20, 90, 0, 255));
+    analogWrite(gatePin, map(min(90, max(minSunElevation, sunElevation)), minSunElevation, 90, 0, 255));
   }
 }
 
@@ -221,6 +229,7 @@ void changeManualBrightness() {
 void setManualBrightness(byte newBrightness) {
   manualBrightness = newBrightness;
   EEPROM.put(eepromAddress + 1, manualBrightness);// save the manual brightness to the EEPROM
+  Serial.println("Manual Brightness: " + String(manualBrightness));
 }
 
 // Rounded HH:mm format
