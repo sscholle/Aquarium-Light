@@ -1,10 +1,15 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <Wire.h> 
+#include <LiquidCrystal_I2C.h>
 #include <RTClib.h>
 #include <ezButton.h>
 #include <SolarCalculator.h>
 #include <EEPROM.h>
+
+// MODES
+#define MANUAL 0
+#define AUTOMATIC 1
 
 // SOLAR CALCULATOR VARIABLES
 double latitude = -34.0195173;     // Observer's latitude 
@@ -23,9 +28,12 @@ ezButton button(buttonPin);  // create ezButton object that attach to pin 7;
 unsigned long pressedTime  = 0;
 unsigned long releasedTime = 0;
 
+// DISPLAY VARIABLES
+// Set the LCD address to 0x3F for a 16 chars and 2 line display
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
 // CLOCK VARIABLES
 RTC_DS3231 RTC;
-
 DateTime now;// = RTC.now();
 
 /**
@@ -66,11 +74,17 @@ const int eepromAddress = 0;// address to store the mode
 
 // INTERNAL DECLARATIONS
 char * hoursToString(double h, char *str);
-void displayTime(DateTime now);
+void debugTime(DateTime now);
 void handleButtonPress();
 void changeManualBrightness();
-void setManualBrightness(byte newBrightness);
+void writeManualBrightness(byte newBrightness);
 void processBrightness();
+void toggleMode();
+void writeMode(byte newMode);
+void displayMode();
+void lcdTopLine(const char *data);
+void lcdBottomLine(const char *data);
+void processLCD();
 
 void setup() {
   // SERIAL
@@ -78,10 +92,10 @@ void setup() {
 
   // EEPROM
   EEPROM.get(eepromAddress, mode);// get the mode from the EEPROM
-  if(mode != 0 && mode != 1) {
-    mode = 1;// default to automatic mode
+  if(mode != MANUAL && mode != AUTOMATIC) {
+    mode = AUTOMATIC;// default to automatic mode
   }
-  Serial.println("Mode: " + String(mode));
+  displayMode();
 
   EEPROM.get(eepromAddress + 1, manualBrightness);// get the manual brightness from the EEPROM
   if(manualBrightness < 0 || manualBrightness > 255) {
@@ -90,7 +104,7 @@ void setup() {
   Serial.println("Manual Brightness: " + String(manualBrightness));
 
   // BUTTON
-  // button.setDebounceTime(50); // set debounce time to 50 milliseconds - not required when using a 'delay' in the loop
+  button.setDebounceTime(50); // set debounce time to 50 milliseconds - not required when using a 'delay' in the loop
 
   // PINS
   pinMode(gatePin, OUTPUT);
@@ -108,114 +122,78 @@ void setup() {
   }
   // RTC.writeSqwPinMode(DS3231_SquareWave1Hz);
   now = RTC.now();
-  displayTime(now);
-  // SUN
+  debugTime(now);
 
-}
-
-// volatile bool buttonPushed = false;
-// volatile bool buttonPressed = false;
-// volatile unsigned long LastMicros;
-
-// volatile static unsigned long last_interrupt_time = 0;
-// void handleButtonPress() //interrupt with debounce
-// {
-//   unsigned long interrupt_time = millis();
-//   if (interrupt_time - last_interrupt_time > 50UL)  // ignores interupts for 50milliseconds
-//   {
-//     buttonPushed = true;
-//   }
-//   last_interrupt_time = interrupt_time;
-// }
-
-void setMode(byte newMode) {
-  mode = newMode;
-  EEPROM.put(eepromAddress, mode);// save the mode to the EEPROM
-  Serial.println("Mode: " + String(mode));
+  lcd.init();                      // initialize the lcd
+  lcd.backlight();                 // turn on backlight
+  lcdTopLine("AutomaLight");
 }
 
 unsigned long lastBrightnessUpdate = 0;
 unsigned long millisBetweenBrightnessUpdates = 500;// 1/2 second
+
+unsigned long lastLCDUpdate = 0;
+unsigned long millisBetweenLCDUpdates = 1500;// 1-1/2 second
 // setup an interrupt to update the brightness of the LED based on the time of day
 void loop() {
-  // LED INDICATOR CODE
-  digitalWrite(ledPin, mode == 0 ? HIGH : LOW);// indicate the mode
-  
+  // Serial.println("Looping...");
   // BUTTON CODE
   button.loop(); // MUST call the loop() function first
-
-  // IF button is pressed - start debounce
   if(button.isPressed())
     pressedTime = millis();
-
   if(button.isReleased()) {
     releasedTime = millis();
-
     long pressDuration = releasedTime - pressedTime;
-
     if( pressDuration < SHORT_PRESS_TIME ) {
-      // short press
-      Serial.println("A short press is detected");
       changeManualBrightness();
+      lastBrightnessUpdate = 0;// force an update of the brightness
     }
-
     if( pressDuration > LONG_PRESS_TIME ) {
-      if(mode == 0) {
-        // if in manual mode, switch to automatic mode
-        setMode(1);
-      } else {
-        // if in automatic mode, switch to manual mode
-        setMode(0);
-      }
-      Serial.println("A long press is detected");
+      toggleMode();
+      lastBrightnessUpdate = 0;// force an update of the brightness
     }
   }
 
-
-  // TIME AND BRIGHTNESS CODE
-  // put your main code here, to run repeatedly:
-  // DateTime now = RTC.now();
-  // displayTime(now);
-
-  // SUNRISE/SUNSET CODE
-  // this only needs to happen every 24 hours - to recalculate the sunrise and sunset times
-  
-  // calcSunriseSunset(now.year(), now.month(), now.day(), latitude, longitude, transit, sunrise, sunset);
-  // // Print results
-  // char str[6];
-  // Serial.println(hoursToString(sunrise + time_zone, str));
-  // Serial.println(hoursToString(transit + time_zone, str));
-  // Serial.println(hoursToString(sunset + time_zone, str));
-
+  // BRIGHTNESS UPDATE
   if(millis() - lastBrightnessUpdate > millisBetweenBrightnessUpdates) {
     lastBrightnessUpdate = millis();
     processBrightness();
   }
 
-
-  delay(10);
+  // LCD UPDATE
+  if(millis() - lastLCDUpdate > millisBetweenLCDUpdates) {
+    lastLCDUpdate = millis();
+    processLCD();
+  }
+  // delay(10);
 }
 
-void processBrightness() {
+void toggleMode() {
   if(mode == 0) {
-    // manual mode
-    analogWrite(gatePin, manualBrightness);
+    writeMode(1);
   } else {
-    // automatic mode
-    now = RTC.now();
-    // NOTE: elevation calculation will be used to limit the brightness of the LED (example 90=max, 0=min)
-    // Calculate the solar position, in degrees
-    calcHorizontalCoordinates(now.unixtime() - time_zone * 3600L, latitude, longitude, sunAzimuth, sunElevation);// for some reason we mustt remove the timezone offset?
-
-    // Print results
-    Serial.print(F("Az: "));
-    Serial.print(sunAzimuth);
-    Serial.print(F("°  El: "));
-    Serial.print(sunElevation);
-    Serial.println(F("°"));
-    // calculate the brightness based on the sun's elevation
-    analogWrite(gatePin, map(min(90, max(minSunElevation, sunElevation)), minSunElevation, 90, 0, 255));
+    writeMode(0);
   }
+  displayMode();
+}
+
+void writeMode(byte newMode) {
+  mode = newMode;
+  EEPROM.put(eepromAddress, mode);// save the mode to the EEPROM
+}
+
+/**
+ * Indicates MODE via Built-in LED
+ * On is MANUAL
+ * Off is AUTOMATIC
+ */
+void displayMode() {
+  if(mode == MANUAL) {
+    digitalWrite(ledPin, HIGH);
+  } else {
+    digitalWrite(ledPin, LOW);
+  }
+  Serial.println("Mode: " + String(mode));
 }
 
 void changeManualBrightness() {
@@ -223,13 +201,45 @@ void changeManualBrightness() {
   if(manualBrightness > 255) {
     manualBrightness = 0;
   }
-  setManualBrightness(manualBrightness);
+  writeManualBrightness(manualBrightness);
 }
 
-void setManualBrightness(byte newBrightness) {
+void writeManualBrightness(byte newBrightness) {
   manualBrightness = newBrightness;
   EEPROM.put(eepromAddress + 1, manualBrightness);// save the manual brightness to the EEPROM
   Serial.println("Manual Brightness: " + String(manualBrightness));
+}
+
+void processBrightness() {
+  if(mode == MANUAL) {
+    analogWrite(gatePin, manualBrightness);
+    Serial.println("Manual Mode: " + String(manualBrightness));
+  } else {
+    now = RTC.now();
+    calcHorizontalCoordinates(now.unixtime() - time_zone * 3600L, latitude, longitude, sunAzimuth, sunElevation);// remove timezone offset
+    // Print results
+    Serial.print(F("Az: "));
+    Serial.print(sunAzimuth);
+    Serial.print(F("°  El: "));
+    Serial.print(sunElevation);
+    Serial.println(F("°"));
+    analogWrite(gatePin, map(min(90, max(minSunElevation, sunElevation)), minSunElevation, 90, 0, 255));
+  }
+}
+
+void processLCD() {
+  // lcd.clear();
+  // lcdTopLine("AutomaLight");
+  if(mode == MANUAL) {
+    char data[16];
+    sprintf(data, "Manual: %d%%", (int)map(manualBrightness, 0, 255, 0, 100));
+    lcdBottomLine(data);
+  } else {
+    char data[16];
+    sprintf(data, "Sun: %d%%", (int)map(min(90, max(minSunElevation, sunElevation)), minSunElevation, 90, 0, 100));
+    lcdBottomLine(data);
+  }
+  // delay(100);
 }
 
 // Rounded HH:mm format
@@ -248,10 +258,19 @@ char * hoursToString(double h, char *str)
   return str;
 }
 
-
 // put function definitions here:
-void displayTime(DateTime now) {
+void debugTime(DateTime now) {
   char data[20];
   sprintf(data, "%d/%d/%d %d:%d", now.day(), now.month(), now.year(), now.hour(), now.minute());
   Serial.println(data);
+}
+
+void lcdTopLine(const char *data) {
+  lcd.setCursor(0,0);
+  lcd.print(data);
+}
+
+void lcdBottomLine(const char *data) {
+  lcd.setCursor(0,1);
+  lcd.print(data);
 }
